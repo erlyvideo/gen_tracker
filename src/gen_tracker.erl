@@ -3,7 +3,6 @@
 %%
 -module(gen_tracker).
 -author('Max Lapshin <max@maxidoors.ru>').
--include("log.hrl").
 
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
@@ -228,7 +227,7 @@ handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) 
 handle_info({'EXIT', _Pid, _Reason}, #tracker{} = Tracker) ->
   {noreply, Tracker};
 
-handle_info(Msg, State) ->
+handle_info(_Msg, State) ->
   {noreply, State}.
 
 terminate(_,#tracker{zone = Zone}) ->
