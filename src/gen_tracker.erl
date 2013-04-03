@@ -226,11 +226,9 @@ handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) 
 
 
 handle_info({'EXIT', _Pid, _Reason}, #tracker{} = Tracker) ->
-  % lager:info("exit ~p: ~p", [_Pid, _Reason]),
   {noreply, Tracker};
 
 handle_info(Msg, State) ->
-  lager:info("Msg: ~p", [Msg]),
   {noreply, State}.
 
 terminate(_,#tracker{zone = Zone}) ->
