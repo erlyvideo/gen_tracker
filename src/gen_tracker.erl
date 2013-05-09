@@ -147,6 +147,9 @@ handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mod
       {reply, {ok, Pid}, Tracker}
   end;
 
+handle_call({terminate_child, Name}, From, #tracker{} = Tracker) ->
+  handle_call({delete_child, Name}, From, Tracker);
+
 handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
     [#entry{pid = Pid, shutdown = Shutdown} = Entry] when is_number(Shutdown) ->
