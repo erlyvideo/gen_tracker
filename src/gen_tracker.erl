@@ -10,6 +10,7 @@
 
 
 -export([start_link/1, find/2, find_or_open/2, info/2, list/1, setattr/3, setattr/4, getattr/3, getattr/4, increment/4,delattr/3]).
+-export([wait/1]).
 
 -export([which_children/1]).
 
@@ -87,6 +88,9 @@ find_or_open(Zone, {Name, _MFA, _RestartType, _Shutdown, _ChildType, _Mods} = Ch
     error:badarg -> {error, gen_tracker_not_started}
   end.
 
+% Sync call to ensure that all messages has been processed
+wait(Zone) ->
+  gen_server:call(Zone, wait).
 
 
 
