@@ -1,9 +1,21 @@
 gen_tracker
 -----------
 
-This is an erlang library that allows you to use supervisor with keeping process names and their metadata in ets.
+gen_tracker is an alternative supervisor, that allows you to register children by term in named ets table,
+store their metadata in this table and clean their data if they die.
 
-MIT license. Use as you wish, don't remove copyrights
+It has reduced functionality, comparing to OTP supervisor, it doesn't have restart throttling.
+
+However, it supports additional features like Module:after_terminate callback which is called with
+name and metadata after child is dead.
+
+gen_tracker can help you to find a child by its name via blazing fast ets:lookup call.
+
+
+License
+=======
+
+MIT license. Use as you wish, don't remove copyrights and pull requests, please.
 
 
 Usage
@@ -18,7 +30,7 @@ Include new supervisor in your application:
       Supervisors = [{streams, {gen_tracker, start_link, [streams]}, permanent, infinity, supervisor, []}],
       {ok, { {one_for_one, 5, 10}, Supervisors} }.
 
-Now gen_tracker instance is started and ets tables 'streams' and 'streams_attrs' are created. Be sure that this name doesn't mess with anything.
+Now gen_tracker instance is started and ets tables 'streams' and 'streams_attrs' are created. Be sure that this name doesn't mess with anything else.
 Also this gen_tracker instance automatically registers itself as a 'streams' process. It is a good idea,
 because table 'streams' is created as a public,named_table so it is already a singleton.
 
