@@ -13,6 +13,7 @@
 -export([wait/1]).
 
 -export([which_children/1]).
+-export([add_existing_child/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -93,6 +94,8 @@ wait(Zone) ->
   gen_server:call(Zone, wait).
 
 
+add_existing_child(Tracker, {_Name, Pid, worker, _} = ChildSpec) when is_pid(Pid) ->
+  gen_server:call(Tracker, {add_existing_child, ChildSpec}).
 
 start_link(Zone) ->
   gen_server:start_link({local, Zone}, ?MODULE, [Zone], []).
@@ -181,6 +184,17 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
       {reply, ok, Tracker};
     [] ->
       {reply, {error, no_child}, Tracker}
+  end;
+
+handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
+  case ets:lookup(Zone, Name) of
+    [#entry{pid = Pid}] ->
+      {reply, {error, {already_started, Pid}}, Tracker};
+    [] ->
+      Ref = erlang:monitor(process,Pid),
+      ets:insert(Zone, #entry{name = Name, mfa = undefined, pid = Pid, restart_type = temporary,
+        shutdown = 200, child_type = worker, mods = Mods, ref = Ref}),
+      {reply, {ok, Pid}, Tracker}
   end;
 
 handle_call(Call, _From, State) ->
@@ -285,6 +299,13 @@ restart_later(Zone, #entry{name = Name, restart_timer = OldTimer, restart_delay 
 
 delattr(Zone,Name,Value) ->
   ets:delete(attr_table(Zone),{Name,Value}).
+
+
+
+delete_entry(Zone, #entry{name = Name, mfa = undefined}) ->
+  ets:select_delete(Zone, ets:fun2ms(fun(#entry{name = N}) when N == Name -> true end)),
+  ets:select_delete(attr_table(Zone), ets:fun2ms(fun({{N, _}, _}) when N == Name -> true end)),
+  ok;
 
 delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}) ->
   case erlang:function_exported(M, after_terminate, 2) of

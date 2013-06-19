@@ -66,3 +66,10 @@ Now let's be sure that gen_tracker instance is a supervisor:
 
 
 
+You can add existing process to supervisor tree.
+
+    gen_tracker:add_existing_child(streams, {<<"stream1">>, Pid, worker, []}).
+
+This can be used for example for adding websocket handlers to some trackers.
+
+

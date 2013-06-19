@@ -16,7 +16,8 @@ groups() ->
       temporary,
       transient,
       permanent,
-      shutdown
+      shutdown,
+      add_existing_child
     ]}
   ].
 
@@ -143,6 +144,27 @@ shutdown(_Config) ->
   ok.
 
 
+
+add_existing_child(_) ->
+  {ok, G} = gen_tracker:start_link(adding_tracker),
+  unlink(G),
+  [] = supervisor:which_children(adding_tracker),
+  Pid = spawn(fun() ->
+    receive M -> M end
+  end),
+  erlang:monitor(process, Pid),
+  gen_tracker:add_existing_child(adding_tracker, {<<"child1">>, Pid, worker, []}),
+  [{<<"child1">>, Pid, worker, []}] = supervisor:which_children(adding_tracker),
+  Pid ! ok,
+  receive
+    {'DOWN', _, _, Pid, _} -> ok
+  after
+    100 -> error(not_died_worker)
+  end,
+  gen_tracker:wait(adding_tracker),
+  [] = supervisor:which_children(adding_tracker),
+  erlang:exit(G, shutdown),
+  ok.
 
 
 
