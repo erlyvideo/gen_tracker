@@ -197,6 +197,9 @@ handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zon
       {reply, {ok, Pid}, Tracker}
   end;
 
+handle_call(stop, _From, #tracker{} = Tracker) ->
+  {stop, normal, ok, Tracker};
+
 handle_call(Call, _From, State) ->
   {stop, {unknown_call, Call}, State}.
 
