@@ -11,12 +11,11 @@ name and metadata after child is dead.
 
 gen_tracker can help you to find a child by its name via blazing fast ets:lookup call.
 
-Also gen_tracker supports async child spawning so that you can start 1000 of long-starting processes simultaneously
 
 License
 =======
 
-MIT license. Use as you wish, don't remove copyrights and send pull requests, please.
+MIT license. Use as you wish, don't remove copyrights and pull requests, please.
 
 
 Usage
