@@ -145,11 +145,16 @@ handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mod
         false ->
           Self = self(),
           Pid = proc_lib:spawn_link(fun() ->
+            put(name, {gen_tracker,Zone,proxy,Name}),
             try erlang:apply(M,F,A) of
               {ok, Pid} ->
                 ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
                   shutdown = Shutdown, child_type = ChildType, mods = Mods}),
-                Self ! {launch_ready, self(), Name, {ok, Pid}};
+                Self ! {launch_ready, self(), Name, {ok, Pid}},
+                erlang:monitor(process,Pid),
+                receive
+                  _Msg -> ok
+                end;
               {error, Error} ->
                 Self ! {launch_ready, self(), Name, {error, Error}};
               Error ->
