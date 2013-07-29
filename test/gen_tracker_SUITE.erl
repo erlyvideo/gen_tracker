@@ -17,6 +17,7 @@ groups() ->
       transient,
       permanent,
       shutdown,
+      delaying_start,
       add_existing_child
     ]}
   ].
@@ -168,6 +169,54 @@ add_existing_child(_) ->
 
 
 
+
+slow_start(Parent) ->
+  Pid = spawn(fun() ->
+    timer:sleep(1000),
+    Parent ! {start, self()},
+    receive _ -> ok end
+  end),
+  receive {start, Pid} -> {ok, Pid} end.
+
+bad_start() ->
+  {error, bad_start}.
+
+error_on_start() ->
+  error(on_start).
+
+delaying_start(_) ->
+  {ok, G} = gen_tracker:start_link(test_tracker1),
+  unlink(G),
+  Self = self(),
+  S1 = spawn(fun() ->
+    Self ! go1,
+    {ok, Pid} = gen_tracker:find_or_open(test_tracker1, {<<"process1">>, {?MODULE, slow_start, [self()]}, temporary, 200, worker, []}),
+    Self ! {child1, Pid}
+  end),
+
+  receive go1 -> ok end,
+  ok = gen_server:call(test_tracker1, wait, 100),
+  {error, bad_start} = gen_tracker:find_or_open(test_tracker1, {<<"bad_process">>, {?MODULE, bad_start, []}, temporary, 200, worker, []}),
+  ok = gen_server:call(test_tracker1, wait, 100),
+
+  {error, on_start} = gen_tracker:find_or_open(test_tracker1, {<<"bad_process2">>, {?MODULE, error_on_start, []}, temporary, 200, worker, []}),
+  ok = gen_server:call(test_tracker1, wait, 100),
+
+  % S1 = spawn(fun() ->
+  %   {ok, Pid} = gen_tracker:find_or_open(test_tracker1, {<<"process2">>, {?MODULE, slow_start, [self()]}, temporary, 200, worker, []}),
+  %   Self ! {child2, Pid}
+  % end),
+
+
+
+  % erlang:monitor(process,Pid),
+  % [{<<"process1">>, Pid, worker, []}] = gen_tracker:which_children(test_tracker),
+  % [{<<"process1">>, Pid, worker, []}] = supervisor:which_children(test_tracker),
+  % Pid ! invalid_stop,
+  % receive {'DOWN', _, _, Pid, _} -> ok after 100 -> error(timeout_kill) end,
+  gen_server:call(test_tracker1, wait), % sync call
+  erlang:exit(G, shutdown),
+  ok.
 
 
 

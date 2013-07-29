@@ -18,7 +18,16 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(tracker, {
-  zone
+  zone,
+  launchers = []
+}).
+
+-record(launch, {
+  name,
+  mfa,
+  pid,
+  ref,
+  waiters = []
 }).
 
 -record(entry, {
@@ -115,7 +124,7 @@ attr_table(Zone) ->
 
 init([Zone]) ->
   process_flag(trap_exit, true),
-  ets:new(Zone, [public,named_table,{keypos,#entry.name}, {read_concurrency, true}]),
+  ets:new(Zone, [public,named_table,{keypos,#entry.name}, {write_concurrency, true}]),
   ets:new(attr_table(Zone), [public,named_table]),
   {ok, #tracker{zone = Zone}}.
 
@@ -126,25 +135,36 @@ handle_call(wait, _From, Tracker) ->
 handle_call(which_children, _From, #tracker{zone = Zone} = Tracker) ->
   {reply, which_children(Zone), Tracker};
 
-handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
+handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}}, From, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
   case ets:lookup(Zone, Name) of
     [] ->
-      try erlang:apply(M,F,A) of
-        {ok, Pid} ->
-          Ref = erlang:monitor(process,Pid),
-          ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
-            shutdown = Shutdown, child_type = ChildType, mods = Mods, ref = Ref}),
-          {reply, {ok,Pid}, Tracker};
-        {error, Error} ->
-          {reply, {error, Error}, Tracker};
-        Error ->
-          error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
-          {reply, Error, Tracker}
-      catch
-        _Class:Error ->
-          error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
-            [Zone, Name,Error, erlang:get_stacktrace()]),
-          {reply, {error, Error}, Tracker}
+      case lists:keytake(Name, #launch.name, Launchers) of
+        {value, #launch{waiters = Waiters} = L, Launchers1} ->
+          L1 = L#launch{waiters = [From|Waiters]},
+          {noreply, Tracker#tracker{launchers = [L1|Launchers1]}};
+        false ->
+          Self = self(),
+          Pid = proc_lib:spawn_link(fun() ->
+            try erlang:apply(M,F,A) of
+              {ok, Pid} ->
+                ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
+                  shutdown = Shutdown, child_type = ChildType, mods = Mods}),
+                Self ! {launch_ready, self(), Name, {ok, Pid}};
+              {error, Error} ->
+                Self ! {launch_ready, self(), Name, {error, Error}};
+              Error ->
+                error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
+                Self ! {launch_ready, self(), Name, Error}
+            catch
+              _Class:Error ->
+                error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
+                  [Zone, Name,Error, erlang:get_stacktrace()]),
+                Self ! {launch_ready, self(), Name, {error, Error}}
+            end 
+          end),
+          Ref = erlang:monitor(process, Pid),
+          L = #launch{name = Name, pid = Pid, ref = Ref, mfa = {M,F,A}, waiters = [From]},
+          {noreply, Tracker#tracker{launchers = [L|Launchers]}}
       end;  
     [#entry{pid = Pid}] ->
       {reply, {ok, Pid}, Tracker}
@@ -205,6 +225,23 @@ handle_call(Call, _From, State) ->
 
 handle_cast(Cast, State) ->
   {stop, {unknown_cast, Cast}, State}.
+
+
+
+handle_info({launch_ready, Launcher, Name, Reply}, #tracker{launchers = Launchers, zone = Zone} = Tracker) ->
+  {value, #launch{pid = Launcher, ref = Ref, name = Name, waiters = Waiters}, Launchers1} =
+    lists:keytake(Name, #launch.name, Launchers),
+  erlang:demonitor(Ref, [flush]),
+  [gen_server:reply(From, Reply) || From <- Waiters],
+  case Reply of
+    {ok, Pid} ->
+      R1 = erlang:monitor(process, Pid),
+      ets:update_element(Zone, Name, {#entry.ref, R1});
+    _ ->
+      ok
+  end,
+  {noreply, Tracker#tracker{launchers = Launchers1}};
+
 
 handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) ->
   case ets:select(Zone, ets:fun2ms(fun(#entry{pid = P} = Entry) when P == Pid -> Entry end)) of
