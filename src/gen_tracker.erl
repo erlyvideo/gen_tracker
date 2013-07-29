@@ -40,6 +40,7 @@
   restart_timer,
   restart_delay,
   shutdown,
+  sub_pid,
   pid
 }).
 
@@ -149,7 +150,7 @@ handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mod
             try erlang:apply(M,F,A) of
               {ok, Pid} ->
                 ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
-                  shutdown = Shutdown, child_type = ChildType, mods = Mods}),
+                  shutdown = Shutdown, child_type = ChildType, sub_pid = self(), mods = Mods}),
                 Self ! {launch_ready, self(), Name, {ok, Pid}},
                 erlang:monitor(process,Pid),
                 receive
@@ -180,12 +181,13 @@ handle_call({terminate_child, Name}, From, #tracker{} = Tracker) ->
 
 handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
-    [#entry{pid = Pid, shutdown = Shutdown} = Entry] when is_number(Shutdown) ->
-      exit(Pid, shutdown),
+    [#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown} = Entry] when is_number(Shutdown) ->
+      exit(SubPid, shutdown),
       receive
         {'DOWN', _, _, Pid, _Reason} -> ok
       after
-        Shutdown -> 
+        Shutdown ->
+          erlang:exit(SubPid, kill),
           erlang:exit(Pid, kill),
           receive
             {'DOWN', _,_, Pid,_} -> ok
@@ -193,14 +195,16 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
       end,
       delete_entry(Zone, Entry),
       {reply, ok, Tracker};
-    [#entry{pid = Pid, shutdown = brutal_kill} = Entry] ->
+    [#entry{sub_pid = SubPid, pid = Pid, shutdown = brutal_kill} = Entry] ->
+      erlang:exit(SubPid, kill),
       erlang:exit(Pid, kill),
       receive
         {'DOWN', _,_, Pid,_} -> ok
       end,
       delete_entry(Zone, Entry),
       {reply, ok, Tracker};
-    [#entry{pid = Pid, shutdown = infinity} = Entry] ->
+    [#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity} = Entry] ->
+      erlang:exit(SubPid, shutdown),
       erlang:exit(Pid, shutdown),
       receive
         {'DOWN', _,_, Pid,_} -> ok
@@ -217,7 +221,7 @@ handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zon
       {reply, {error, {already_started, Pid}}, Tracker};
     [] ->
       Ref = erlang:monitor(process,Pid),
-      ets:insert(Zone, #entry{name = Name, mfa = undefined, pid = Pid, restart_type = temporary,
+      ets:insert(Zone, #entry{name = Name, mfa = undefined, sub_pid = Pid, pid = Pid, restart_type = temporary,
         shutdown = 200, child_type = worker, mods = Mods, ref = Ref}),
       {reply, {ok, Pid}, Tracker}
   end;
@@ -258,7 +262,7 @@ handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) 
       try erlang:apply(M,F,A) of
         {ok, NewPid} ->
           NewRef = erlang:monitor(process,NewPid),
-          ets:insert(Zone, Entry#entry{pid = NewPid, ref = NewRef});
+          ets:insert(Zone, Entry#entry{pid = NewPid, sub_pid = NewPid, ref = NewRef});
         {error, Error} ->
           error_logger:error_msg("Failed to restart transient ~s: ~p", [Name, Error]),
           delete_entry(Zone, Entry);
@@ -274,7 +278,7 @@ handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) 
       try erlang:apply(M,F,A) of
         {ok, NewPid} ->
           NewRef = erlang:monitor(process,NewPid),
-          ets:insert(Zone, Entry#entry{pid = NewPid, ref = NewRef});
+          ets:insert(Zone, Entry#entry{pid = NewPid, sub_pid = NewPid, ref = NewRef});
         Error ->
           error_logger:error_msg("Error restarting permanent ~s: ~p", [Name, Error]),          
           restart_later(Zone, Entry)
@@ -284,7 +288,6 @@ handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) 
           restart_later(Zone, Entry)
       end;
     [] ->
-      % ?D({unknown_pid_failed,File, ets:tab2list(Zone)})
       ok
   end,
   {noreply, Tracker};
@@ -298,18 +301,18 @@ handle_info(_Msg, State) ->
 
 terminate(_,#tracker{zone = Zone}) ->
   [begin
-    if Shutdown == brutal_kill -> erlang:exit(Pid,kill);
+    if Shutdown == brutal_kill -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill);
     true ->
       Delay = if Shutdown == infinity -> 5000; is_number(Shutdown) -> Shutdown end,
-      erlang:exit(Pid,shutdown),
+      erlang:exit(SubPid,shutdown),
       receive
         {'DOWN', _, _, Pid, _} -> ok
       after
-        Delay -> erlang:exit(Pid,kill)
+        Delay -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill)
       end
-    end,
-    delete_entry(Zone, Entry)
-  end || #entry{pid = Pid, shutdown = Shutdown} = Entry <- ets:tab2list(Zone)],
+    end
+    % delete_entry(Zone, Entry)
+  end || #entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown} <- ets:tab2list(Zone)],
   ok.
 
 code_change(_, State, _) ->
