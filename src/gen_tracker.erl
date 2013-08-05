@@ -14,6 +14,7 @@
 
 -export([which_children/1]).
 -export([add_existing_child/2]).
+-export([child_monitoring/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -130,13 +131,56 @@ init([Zone]) ->
   {ok, #tracker{zone = Zone}}.
 
 
+
+
+launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
+  Self = self(),
+  proc_lib:spawn_link(fun() ->
+    put(name, {gen_tracker,Zone,proxy,Name}),
+    try erlang:apply(M,F,A) of
+      {ok, Pid} ->
+        ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
+          shutdown = Shutdown, child_type = ChildType, sub_pid = self(), mods = Mods}),
+        Self ! {launch_ready, self(), Name, {ok, Pid}},
+        erlang:monitor(process,Pid),
+        erlang:hibernate(?MODULE, child_monitoring, [Pid]);
+      {error, Error} ->
+        Self ! {launch_ready, self(), Name, {error, Error}};
+      Error ->
+        error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
+        Self ! {launch_ready, self(), Name, Error}
+    catch
+      _Class:Error ->
+        error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
+          [Zone, Name,Error, erlang:get_stacktrace()]),
+        Self ! {launch_ready, self(), Name, {error, Error}}
+    end 
+  end).
+
+
+child_monitoring(Pid) ->
+  receive 
+    M -> 
+      case M of
+        {'DOWN', _, _, Pid, _} -> exit(normal);
+        _ -> ok
+      end
+  after
+    0 -> ok
+  end,
+  erlang:hibernate(?MODULE, child_monitoring, [Pid]).
+
+
+
+
+
 handle_call(wait, _From, Tracker) ->
   {reply, ok, Tracker};
 
 handle_call(which_children, _From, #tracker{zone = Zone} = Tracker) ->
   {reply, which_children(Zone), Tracker};
 
-handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}}, From, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
+handle_call({find_or_open, {Name, {M,F,A}, _RT, _S, _CT, _M} = Spec}, From, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
   case ets:lookup(Zone, Name) of
     [] ->
       case lists:keytake(Name, #launch.name, Launchers) of
@@ -144,30 +188,7 @@ handle_call({find_or_open, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mod
           L1 = L#launch{waiters = [From|Waiters]},
           {noreply, Tracker#tracker{launchers = [L1|Launchers1]}};
         false ->
-          Self = self(),
-          Pid = proc_lib:spawn_link(fun() ->
-            put(name, {gen_tracker,Zone,proxy,Name}),
-            try erlang:apply(M,F,A) of
-              {ok, Pid} ->
-                ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
-                  shutdown = Shutdown, child_type = ChildType, sub_pid = self(), mods = Mods}),
-                Self ! {launch_ready, self(), Name, {ok, Pid}},
-                erlang:monitor(process,Pid),
-                receive
-                  _Msg -> ok
-                end;
-              {error, Error} ->
-                Self ! {launch_ready, self(), Name, {error, Error}};
-              Error ->
-                error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
-                Self ! {launch_ready, self(), Name, Error}
-            catch
-              _Class:Error ->
-                error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
-                  [Zone, Name,Error, erlang:get_stacktrace()]),
-                Self ! {launch_ready, self(), Name, {error, Error}}
-            end 
-          end),
+          Pid = launch_child(Zone, Spec),
           Ref = erlang:monitor(process, Pid),
           L = #launch{name = Name, pid = Pid, ref = Ref, mfa = {M,F,A}, waiters = [From]},
           {noreply, Tracker#tracker{launchers = [L|Launchers]}}
@@ -359,11 +380,14 @@ delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}) ->
   case erlang:function_exported(M, after_terminate, 2) of
     true ->
       Attrs = ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)),
-      try M:after_terminate(Name, Attrs)
-      catch
-        Class:Error ->
-          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n", [M, Name, Class, Error, erlang:get_stacktrace()])
-      end;
+      spawn(fun() ->
+        put(name, {gen_tracker_after_terminate,Zone,Name}),
+        try M:after_terminate(Name, Attrs)
+        catch
+          Class:Error ->
+            error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n", [M, Name, Class, Error, erlang:get_stacktrace()])
+        end
+      end);
     false -> ok
   end,
   ets:select_delete(Zone, ets:fun2ms(fun(#entry{name = N}) when N == Name -> true end)),
