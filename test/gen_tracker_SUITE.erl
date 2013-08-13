@@ -138,7 +138,7 @@ shutdown(_Config) ->
   erlang:monitor(process,Pid),
 
   erlang:exit(G, shutdown),
-  Reason = receive {'DOWN', _, _, G, Reason_} -> Reason_ after 100 -> exit(timeout_shutdown) end,
+  Reason = receive {'DOWN', _, _, G, Reason_} -> Reason_ after 400 -> exit(timeout_shutdown) end,
   shutdown = Reason,
   not erlang:is_process_alive(Pid) orelse error(child_is_alive),
   ok.
