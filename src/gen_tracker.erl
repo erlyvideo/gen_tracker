@@ -14,7 +14,7 @@
 
 -export([which_children/1]).
 -export([add_existing_child/2]).
--export([child_monitoring/1]).
+-export([child_monitoring/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -134,41 +134,43 @@ init([Zone]) ->
 
 
 launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
-  Self = self(),
+  Parent = self(),
   proc_lib:spawn_link(fun() ->
     put(name, {gen_tracker,Zone,proxy,Name}),
+    process_flag(trap_exit,true),
     try erlang:apply(M,F,A) of
       {ok, Pid} ->
         ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
           shutdown = Shutdown, child_type = ChildType, sub_pid = self(), mods = Mods}),
-        Self ! {launch_ready, self(), Name, {ok, Pid}},
+        Parent ! {launch_ready, self(), Name, {ok, Pid}},
         erlang:monitor(process,Pid),
-        erlang:hibernate(?MODULE, child_monitoring, [Pid]);
+        proc_lib:hibernate(?MODULE, child_monitoring, [Pid, Parent]);
       {error, Error} ->
-        Self ! {launch_ready, self(), Name, {error, Error}};
+        Parent ! {launch_ready, self(), Name, {error, Error}};
       Error ->
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
-        Self ! {launch_ready, self(), Name, Error}
+        Parent ! {launch_ready, self(), Name, Error}
     catch
       _Class:Error ->
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
           [Zone, Name,Error, erlang:get_stacktrace()]),
-        Self ! {launch_ready, self(), Name, {error, Error}}
+        Parent ! {launch_ready, self(), Name, {error, Error}}
     end 
   end).
 
 
-child_monitoring(Pid) ->
-  receive 
+child_monitoring(Pid, Parent) ->
+  receive
     M -> 
       case M of
+        {'EXIT', Parent, Reason} -> exit(Reason);
         {'DOWN', _, _, Pid, _} -> exit(normal);
         _ -> ok
       end
   after
     0 -> ok
   end,
-  erlang:hibernate(?MODULE, child_monitoring, [Pid]).
+  erlang:hibernate(?MODULE, child_monitoring, [Pid, Parent]).
 
 
 
