@@ -14,10 +14,11 @@ groups() ->
     {creation, [], [
       wrong_child_spec,
       temporary,
-      transient,
-      permanent,
+      % transient,
+      % permanent,
       shutdown,
-      add_existing_child
+      add_existing_child,
+      async_exit_child
     ]}
   ].
 
@@ -162,13 +163,39 @@ add_existing_child(_) ->
     100 -> error(not_died_worker)
   end,
   gen_tracker:wait(adding_tracker),
+  timer:sleep(100),
   [] = supervisor:which_children(adding_tracker),
   erlang:exit(G, shutdown),
   ok.
 
 
+async_exit_child(_) ->
+  {ok, G} = gen_tracker:start_link(test_tracker),
+  unlink(G),
+  erlang:monitor(process, G),
 
+  [ets:insert(test_tracker_attrs, {{a,I}, {value,I}}) || I <- lists:seq(1,1000000)],
 
+  Name = <<"async_terminate">>,
+  {ok, Pid} = gen_tracker:find_or_open(test_tracker, {Name, {test_async_after_terminate, start_link, [Name, self()]}, temporary, 200, worker, []}),
+  erlang:monitor(process,Pid),
+
+  Pid ! stop,
+  receive
+    {'DOWN', _, _, Pid, _} -> ok
+  after
+    100 -> error(die_timeout)
+  end,
+
+  P = receive
+    {dying, Name, P_} -> P_
+  end,
+
+  ok = gen_server:call(G, wait, 50),
+  P ! get_away,
+  ok = gen_server:call(G, wait, 50),
+  ok.
+  
 
 
 
