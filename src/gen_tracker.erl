@@ -211,14 +211,14 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
     [#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown}] when is_number(Shutdown) ->
       exit(SubPid, shutdown),
       receive
-        {'DOWN', _, _, Pid, _Reason} -> ok
+        {'EXIT', SubPid, _Reason} -> ok
       after
         Shutdown ->
           erlang:exit(SubPid, kill),
           erlang:exit(Pid, kill),
           delete_entry(Zone, Name),
           receive
-            {'DOWN', _,_, Pid,_} -> ok
+            {'EXIT', SubPid,_} -> ok
           end
       end,
       {reply, ok, Tracker};
@@ -227,14 +227,14 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
       erlang:exit(Pid, kill),
       delete_entry(Zone, Name),
       receive
-        {'DOWN', _,_, Pid,_} -> ok
+        {'EXIT', SubPid,_} -> ok
       end,
       {reply, ok, Tracker};
     [#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity}] ->
       erlang:exit(SubPid, shutdown),
       erlang:exit(Pid, shutdown),
       receive
-        {'DOWN', _,_, Pid,_} -> ok
+        {'EXIT', SubPid,_} -> ok
       end,
       {reply, ok, Tracker};
     [] ->
