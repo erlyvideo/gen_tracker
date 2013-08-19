@@ -161,10 +161,11 @@ launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
 
 child_monitoring(Zone, Name, Pid, Parent) ->
   receive
-    M -> 
+    M ->
       case M of
         {'EXIT', Parent, Reason} ->
           delete_entry(Zone, Name),
+          exit(Pid, Reason),
           exit(Reason);
         {'DOWN', _, _, Pid, _} -> 
           delete_entry(Zone, Name),
@@ -335,18 +336,19 @@ handle_info(_Msg, State) ->
   {noreply, State}.
 
 terminate(_,#tracker{zone = Zone}) ->
+  [erlang:exit(SubPid, shutdown) || #entry{sub_pid = SubPid} <- ets:tab2list(Zone)],
+
   [begin
     if Shutdown == brutal_kill -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill);
     true ->
+      erlang:monitor(process, Pid),
       Delay = if Shutdown == infinity -> 5000; is_number(Shutdown) -> Shutdown end,
-      erlang:exit(SubPid,shutdown),
       receive
         {'DOWN', _, _, Pid, _} -> ok
       after
         Delay -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill)
       end
     end
-    % delete_entry(Zone, Entry)
   end || #entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown} <- ets:tab2list(Zone)],
   ok.
 
