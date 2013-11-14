@@ -112,6 +112,8 @@ start_link(Zone) ->
   gen_server:start_link({local, Zone}, ?MODULE, [Zone], []).
 
 
+attr_table(live_streams) -> live_streams_attrs;
+attr_table(vod_files) -> vod_files_attrs;
 attr_table(Zone) ->
   list_to_atom(atom_to_list(Zone)++"_attrs").
 
@@ -346,7 +348,11 @@ terminate(_,#tracker{zone = Zone}) ->
       receive
         {'DOWN', _, _, Pid, _} -> ok
       after
-        Delay -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill)
+        Delay -> 
+          erlang:exit(SubPid,kill), erlang:exit(Pid,kill),
+          receive
+            {'DOWN', _, _, Pid, _} -> ok
+          end
       end
     end
   end || #entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown} <- ets:tab2list(Zone)],
