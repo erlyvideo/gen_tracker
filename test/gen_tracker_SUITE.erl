@@ -18,6 +18,7 @@ groups() ->
       % permanent,
       shutdown,
       add_existing_child,
+      rewrite_existing_child,
       async_exit_child
     ]}
   ].
@@ -165,6 +166,24 @@ add_existing_child(_) ->
   gen_tracker:wait(adding_tracker),
   timer:sleep(100),
   [] = supervisor:which_children(adding_tracker),
+  erlang:exit(G, shutdown),
+  ok.
+
+
+rewrite_existing_child(_) ->
+  {ok, G} = gen_tracker:start_link(rewrite_tracker),
+  unlink(G),
+  [] = supervisor:which_children(rewrite_tracker),
+  Pid = spawn(fun() ->
+    receive M -> M end
+  end),
+  Pid2 = spawn(fun() ->
+    receive M -> M end
+  end),
+  erlang:monitor(process, Pid),
+  {ok, Pid} = gen_tracker:add_existing_child(rewrite_tracker, {<<"child1">>, Pid, worker, []}),
+  {error, {already_started, Pid}} = gen_tracker:add_existing_child(rewrite_tracker, {<<"child1">>, Pid2, worker, []}),
+  [{<<"child1">>, Pid, worker, []}] = supervisor:which_children(rewrite_tracker),
   erlang:exit(G, shutdown),
   ok.
 

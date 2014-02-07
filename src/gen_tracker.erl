@@ -246,8 +246,8 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
 
 handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
-    [#entry{pid = Pid}] ->
-      {reply, {error, {already_started, Pid}}, Tracker};
+    [#entry{pid = Pid2}] ->
+      {reply, {error, {already_started, Pid2}}, Tracker};
     [] ->
       Ref = erlang:monitor(process,Pid),
       ets:insert(Zone, #entry{name = Name, mfa = undefined, sub_pid = Pid, pid = Pid, restart_type = temporary,
