@@ -16,6 +16,7 @@ groups() ->
       temporary,
       % transient,
       % permanent,
+      list,
       shutdown,
       add_existing_child,
       rewrite_existing_child,
@@ -90,6 +91,24 @@ transient(_Config) ->
   [] = gen_tracker:which_children(test_tracker),
   [] = supervisor:which_children(test_tracker),
   ok.
+
+
+
+list(_) ->
+  {ok, G} = gen_tracker:start_link(test_tracker),
+  unlink(G),
+  {ok, Pid} = gen_tracker:find_or_open(test_tracker, {<<"list1">>, {?MODULE, process1, [self()]}, transient, 200, worker, []}),
+  gen_tracker:setattr(test_tracker, <<"list1">>, [{key1,value1},{key2,value2}]),
+  [{<<"list1">>,Attrs1}] = gen_tracker:list(test_tracker),
+  value1 = proplists:get_value(key1,Attrs1),
+  value2 = proplists:get_value(key2,Attrs1),
+
+  [{<<"list1">>,Attrs2}] = gen_tracker:list(test_tracker, [key1]),
+  value1 = proplists:get_value(key1, Attrs2),
+  false = lists:keyfind(key2, 1, Attrs2),
+  ok.
+
+
 
 
 

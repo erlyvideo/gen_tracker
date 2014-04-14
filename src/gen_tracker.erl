@@ -11,6 +11,7 @@
 
 -export([start_link/1, find/2, find_or_open/2, info/2, list/1, setattr/3, setattr/4, getattr/3, getattr/4, increment/4,delattr/3]).
 -export([wait/1]).
+-export([list/2, info/3]).
 
 -export([which_children/1]).
 -export([add_existing_child/2]).
@@ -49,6 +50,16 @@
 info(Zone, Name) ->
   ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)).
 
+info(Zone, Name, Keys) ->
+  AttrTable = attr_table(Zone),
+  lists:flatmap(fun(Key) -> 
+    case ets:lookup(AttrTable, {Name,Key}) of
+      [] -> [];
+      [{{_,_},Value}] -> [{Key,Value}]
+    end
+  end, Keys).
+
+
 setattr(Zone, Name, Attributes) ->
   ets:insert(attr_table(Zone), [{{Name, K}, V} || {K,V} <- Attributes]).
 
@@ -78,6 +89,19 @@ increment(Zone, Name, Key, Incr) ->
 
 list(Zone) ->
   [{Name,[{pid,Pid}|info(Zone, Name)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+
+list(Zone, Keys) ->
+  AttrTable = attr_table(Zone),
+  [begin
+    Attrs = lists:flatmap(fun(Key) -> 
+      case ets:lookup(AttrTable, {Name,Key}) of
+        [] -> [];
+        [{{_,_},Value}] -> [{Key,Value}]
+      end
+    end, Keys),
+    {Name,[{pid,Pid}|Attrs]}
+  end || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+
 
 find(Zone, Name) ->
   case ets:lookup(Zone, Name) of
