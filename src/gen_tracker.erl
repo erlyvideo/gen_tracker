@@ -193,7 +193,7 @@ child_monitoring(Zone, Name, Pid, Parent) ->
           delete_entry(Zone, Name),
           exit(Pid, Reason),
           exit(Reason);
-        {'DOWN', _, _, Pid, _} -> 
+        {'DOWN', _, _, Pid, _} ->
           delete_entry(Zone, Name),
           exit(normal);
         _ -> ok
@@ -209,6 +209,9 @@ child_monitoring(Zone, Name, Pid, Parent) ->
 
 handle_call(wait, _From, Tracker) ->
   {reply, ok, Tracker};
+
+handle_call(shutdown, _From, Tracker) ->
+  {stop, normal, ok, Tracker};
 
 handle_call(which_children, _From, #tracker{zone = Zone} = Tracker) ->
   {reply, which_children(Zone), Tracker};
