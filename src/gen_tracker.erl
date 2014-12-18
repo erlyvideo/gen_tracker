@@ -205,13 +205,48 @@ child_monitoring(Zone, Name, Pid, Parent) ->
 
 
 
+shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown, name = Name}, Zone) when is_number(Shutdown) ->
+  exit(SubPid, shutdown),
+  receive
+    {'EXIT', SubPid, _Reason} -> ok
+  after
+    Shutdown ->
+      erlang:exit(SubPid, kill),
+      erlang:exit(Pid, kill),
+      delete_entry(Zone, Name),
+      receive
+        {'EXIT', SubPid,_} -> ok
+      end
+  end,
+  ok;
+
+shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = brutal_kill, name = Name}, Zone) ->
+  delete_entry(Zone, Name),
+  erlang:exit(SubPid, kill),
+  erlang:exit(Pid, kill),
+  receive
+    {'EXIT', SubPid,_} -> ok
+  end,
+  ok;
+
+shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity, name = Name}, Zone) ->
+  erlang:exit(SubPid, shutdown),
+  erlang:exit(Pid, shutdown),
+  receive
+    {'EXIT', SubPid,_} -> ok
+  end,
+  delete_entry(Zone, Name),
+  ok.
+
+
 
 
 handle_call(wait, _From, Tracker) ->
   {reply, ok, Tracker};
 
-handle_call(shutdown, _From, Tracker) ->
-  {stop, normal, ok, Tracker};
+handle_call(shutdown, _From, #tracker{zone = Zone} = Tracker) ->
+  [shutdown_child(E,Zone) || E <- ets:tab2list(Zone)],
+  {stop, shutdown, ok, Tracker};
 
 handle_call(which_children, _From, #tracker{zone = Zone} = Tracker) ->
   {reply, which_children(Zone), Tracker};
@@ -238,34 +273,8 @@ handle_call({terminate_child, Name}, From, #tracker{} = Tracker) ->
 
 handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
-    [#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown}] when is_number(Shutdown) ->
-      exit(SubPid, shutdown),
-      receive
-        {'EXIT', SubPid, _Reason} -> ok
-      after
-        Shutdown ->
-          erlang:exit(SubPid, kill),
-          erlang:exit(Pid, kill),
-          delete_entry(Zone, Name),
-          receive
-            {'EXIT', SubPid,_} -> ok
-          end
-      end,
-      {reply, ok, Tracker};
-    [#entry{sub_pid = SubPid, pid = Pid, shutdown = brutal_kill}] ->
-      erlang:exit(SubPid, kill),
-      erlang:exit(Pid, kill),
-      delete_entry(Zone, Name),
-      receive
-        {'EXIT', SubPid,_} -> ok
-      end,
-      {reply, ok, Tracker};
-    [#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity}] ->
-      erlang:exit(SubPid, shutdown),
-      erlang:exit(Pid, shutdown),
-      receive
-        {'EXIT', SubPid,_} -> ok
-      end,
+    [Entry] ->
+      shutdown_child(Entry, Zone),
       {reply, ok, Tracker};
     [] ->
       {reply, {error, no_child}, Tracker}

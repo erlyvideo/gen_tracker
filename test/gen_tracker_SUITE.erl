@@ -97,7 +97,7 @@ transient(_Config) ->
 list(_) ->
   {ok, G} = gen_tracker:start_link(test_tracker),
   unlink(G),
-  {ok, Pid} = gen_tracker:find_or_open(test_tracker, {<<"list1">>, {?MODULE, process1, [self()]}, transient, 200, worker, []}),
+  {ok, _Pid} = gen_tracker:find_or_open(test_tracker, {<<"list1">>, {?MODULE, process1, [self()]}, transient, 200, worker, []}),
   gen_tracker:setattr(test_tracker, <<"list1">>, [{key1,value1},{key2,value2}]),
   [{<<"list1">>,Attrs1}] = gen_tracker:list(test_tracker),
   value1 = proplists:get_value(key1,Attrs1),
@@ -106,6 +106,7 @@ list(_) ->
   [{<<"list1">>,Attrs2}] = gen_tracker:list(test_tracker, [key1]),
   value1 = proplists:get_value(key1, Attrs2),
   false = lists:keyfind(key2, 1, Attrs2),
+  gen_server:call(G, shutdown),
   ok.
 
 
@@ -147,6 +148,7 @@ permanent(_Config) ->
 
   [] = gen_tracker:which_children(test_tracker),
   [] = supervisor:which_children(test_tracker),
+  gen_server:call(G, shutdown),
   ok.
 
 
@@ -232,6 +234,7 @@ async_exit_child(_) ->
   ok = gen_server:call(G, wait, 50),
   P ! get_away,
   ok = gen_server:call(G, wait, 50),
+  gen_server:call(G, shutdown),
   ok.
   
 
