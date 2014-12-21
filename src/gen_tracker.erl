@@ -192,6 +192,11 @@ child_monitoring(Zone, Name, Pid, Parent) ->
         {'EXIT', Parent, Reason} ->
           delete_entry(Zone, Name),
           exit(Pid, Reason),
+          receive
+            {'DOWN', _, _, Pid, _} -> ok
+          after
+            5000 -> ok
+          end,
           exit(Reason);
         {'DOWN', _, _, Pid, _} ->
           delete_entry(Zone, Name),
@@ -377,17 +382,30 @@ terminate(_,#tracker{zone = Zone}) ->
   [erlang:exit(SubPid, shutdown) || #entry{sub_pid = SubPid} <- ets:tab2list(Zone)],
 
   [begin
-    if Shutdown == brutal_kill -> erlang:exit(SubPid,kill), erlang:exit(Pid,kill);
-    true ->
-      erlang:monitor(process, Pid),
-      Delay = if Shutdown == infinity -> 5000; is_number(Shutdown) -> Shutdown end,
+    erlang:monitor(process, Pid),
+    erlang:monitor(process, SubPid),
+    if Shutdown == brutal_kill ->
+      erlang:exit(SubPid,kill),
+      erlang:exit(Pid,kill),
       receive
         {'DOWN', _, _, Pid, _} -> ok
+      end,
+      receive
+        {'DOWN', _, _, SubPid, _} -> ok
+      end,
+      ok;
+    true ->
+      Delay = if Shutdown == infinity -> 20000; is_number(Shutdown) -> Shutdown end,
+      receive
+        {'DOWN', _, _, SubPid, _} -> ok
       after
         Delay -> 
           erlang:exit(SubPid,kill), erlang:exit(Pid,kill),
           receive
             {'DOWN', _, _, Pid, _} -> ok
+          end,
+          receive
+            {'DOWN', _, _, SubPid, _} -> ok
           end
       end
     end
