@@ -50,14 +50,37 @@
 info(Zone, Name) ->
   ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)).
 
+
+% Name == <<"aa">>
+% ets:fun2ms(fun({{N, K}, V}) when N == Name andalso (K == <<"key">> orelse K == key2) -> {K,V} end).
+% [{  
+%   {{'$1','$2'},'$3'},
+%
+%   [{'andalso',{'==','$1',{const,<<"aa">>}},
+%               {'orelse',{'==','$2',<<"key">>},{'==','$2',key2}}}],
+%
+%   [{{'$2','$3'}}]
+% }]
+
+info(_Zone, _Name, []) ->
+  [];
+
 info(Zone, Name, Keys) ->
-  AttrTable = attr_table(Zone),
-  lists:flatmap(fun(Key) -> 
-    case ets:lookup(AttrTable, {Name,Key}) of
-      [] -> [];
-      [{{_,_},Value}] -> [{Key,Value}]
-    end
-  end, Keys).
+  Head = {{'$1','$2'},'$3'},
+  Output = [{{'$2','$3'}}],
+
+  KeyCond = case Keys of
+    {ms, Keys0} -> Keys0;
+    _ -> build_key_condition(Keys)
+  end,
+  Cond = [{'andalso',{'==', '$1', Name}, KeyCond }],
+  MS = [{Head, Cond, Output}],
+  ets:select(attr_table(Zone), MS).
+
+
+build_key_condition([Key]) -> {'==', '$2', Key};
+build_key_condition([Key|Keys]) -> {'orelse', {'==', '$2', Key}, build_key_condition(Keys)}.
+
 
 
 setattr(Zone, Name, Attributes) ->
@@ -90,17 +113,15 @@ increment(Zone, Name, Key, Incr) ->
 list(Zone) ->
   [{Name,[{pid,Pid}|info(Zone, Name)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
 
+
+list(Zone, []) ->
+  [{Name,[{pid,Pid}]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)];
+
 list(Zone, Keys) ->
-  AttrTable = attr_table(Zone),
-  [begin
-    Attrs = lists:flatmap(fun(Key) -> 
-      case ets:lookup(AttrTable, {Name,Key}) of
-        [] -> [];
-        [{{_,_},Value}] -> [{Key,Value}]
-      end
-    end, Keys),
-    {Name,[{pid,Pid}|Attrs]}
-  end || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+  KeysMS = {ms, build_key_condition(Keys)},
+  [{Name,[{pid,Pid}|info(Zone, Name, KeysMS)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+
+
 
 
 find(Zone, Name) ->
