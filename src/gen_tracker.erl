@@ -19,6 +19,8 @@
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
+-export([init_setter/1]).
+
 -record(tracker, {
   zone,
   launchers = []
@@ -84,10 +86,17 @@ build_key_condition([Key|Keys]) -> {'orelse', {'==', '$2', Key}, build_key_condi
 
 
 setattr(Zone, Name, Attributes) ->
-  ets:insert(attr_table(Zone), [{{Name, K}, V} || {K,V} <- Attributes]).
+  % ets:insert(attr_table(Zone), [{{Name, K}, V} || {K,V} <- Attributes]).
+  gen_server:call(attr_process(Zone), {set, Name, Attributes}).
 
 setattr(Zone, Name, Key, Value) ->
-  ets:insert(attr_table(Zone), {{Name, Key}, Value}).
+  % ets:insert(attr_table(Zone), {{Name, Key}, Value}).
+  gen_server:call(attr_process(Zone), {set, Name, Key, Value}).
+
+delattr(Zone,Name,Key) ->
+  % ets:delete(attr_table(Zone),{Name,Key}).
+  gen_server:call(attr_process(Zone), {delete, Name, Key}).
+
 
 getattr(Zone, Name, Key) ->
   case ets:lookup(attr_table(Zone), {Name, Key}) of
@@ -154,7 +163,7 @@ add_existing_child(Tracker, {_Name, Pid, worker, _} = ChildSpec) when is_pid(Pid
   gen_server:call(Tracker, {add_existing_child, ChildSpec}).
 
 start_link(Zone) ->
-  gen_server:start_link({local, Zone}, ?MODULE, [Zone], []).
+  gen_server:start_link({local, Zone}, ?MODULE, [Zone], [{spawn_opt,[{fullsweep_after,1}]}]).
 
 
 attr_table(live_streams) -> live_streams_attrs;
@@ -163,6 +172,10 @@ attr_table(Zone) ->
   list_to_atom(atom_to_list(Zone)++"_attrs").
 
 
+attr_process(live_streams) -> live_streams_setter;
+attr_process(vod_files) -> vod_files_setter;
+attr_process(Zone) ->
+  list_to_atom(atom_to_list(Zone)++"_setter").
 
 
 
@@ -173,9 +186,38 @@ attr_table(Zone) ->
 
 init([Zone]) ->
   process_flag(trap_exit, true),
-  ets:new(Zone, [public,named_table,{keypos,#entry.name}, {write_concurrency, true}]),
-  ets:new(attr_table(Zone), [public,named_table]),
+  ets:new(Zone, [public,named_table,{keypos,#entry.name}, {read_concurrency, true}]),
+  ets:new(attr_table(Zone), [public,named_table, {read_concurrency, true}]),
+
+  proc_lib:start_link(?MODULE, init_setter, [Zone]),
   {ok, #tracker{zone = Zone}}.
+
+
+init_setter(Zone) ->
+  erlang:register(attr_process(Zone), self()),
+  proc_lib:init_ack({ok, self()}),
+  put(name, {setter, Zone}),
+  loop_setter(attr_table(Zone)).
+
+loop_setter(Table) ->
+  Msg = receive M -> M end,
+  case Msg of
+    {'$gen_call', From, {set, Name, Key, Value}} ->
+      gen:reply(From, ok),
+      ets:insert(Table, {{Name, Key}, Value}),
+      loop_setter(Table);
+    {'$gen_call', From, {set, Name, Attributes}} ->
+      gen:reply(From, ok),
+      ets:insert(Table, [{{Name, K}, V} || {K,V} <- Attributes]),
+      loop_setter(Table);
+    {'$gen_call', From, {delete, Name, Key}} ->
+      gen:reply(From, ok),
+      ets:delete(Table, {Name, Key}),
+      loop_setter(Table);
+    Else ->
+      error_logger:info_msg("Unknown msg to ~p: ~p", [Table, Else]),
+      loop_setter(Table)
+  end.
 
 
 
@@ -463,8 +505,6 @@ which_children(Zone) ->
 
 
 
-delattr(Zone,Name,Value) ->
-  ets:delete(attr_table(Zone),{Name,Value}).
 
 
 
