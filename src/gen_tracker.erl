@@ -146,7 +146,7 @@ find_or_open(Zone, {Name, _MFA, _RestartType, _Shutdown, _ChildType, _Mods} = Ch
   try ets:lookup(Zone, Name) of
     [] ->
       case supervisor:check_childspecs([ChildSpec]) of
-        ok -> gen_server:call(Zone, {find_or_open, ChildSpec}, 10000);
+        ok -> gen_server:call(Zone, {find_or_open, ChildSpec}, 60000);
         Error -> Error
       end;
     [#entry{pid = Pid}] -> {ok, Pid}
@@ -158,11 +158,6 @@ find_or_open(Zone, {Name, _MFA, _RestartType, _Shutdown, _ChildType, _Mods} = Ch
 wait(Zone) ->
   gen_server:call(Zone, wait).
 
-
-
-
-add_existing_child(Tracker, {Pid, {_Name, _MFA, _RestartType, _Shutdown, worker, _Mods}} = ChildSpec) when is_pid(Pid) ->
-  gen_server:call(Tracker, {add_existing_child, ChildSpec});
 
 add_existing_child(Tracker, {_Name, Pid, worker, _} = ChildSpec) when is_pid(Pid) ->
   gen_server:call(Tracker, {add_existing_child, ChildSpec}).
@@ -353,13 +348,25 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
       {reply, {error, no_child}, Tracker}
   end;
 
+handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
+  case ets:lookup(Zone, Name) of
+    [#entry{pid = Pid2}] ->
+      {reply, {error, {already_started, Pid2}}, Tracker};
+    [] ->
+      Ref = erlang:monitor(process,Pid),
+      ets:insert(Zone, #entry{name = Name, mfa = undefined, sub_pid = Pid, pid = Pid, restart_type = temporary,
+        shutdown = 200, child_type = worker, mods = Mods, ref = Ref}),
 
-handle_call({add_existing_child, {Pid, {Name, MFA, RestartType, Shutdown, worker, Mods}}}, _From, #tracker{} = Tracker) ->
-  do_add_existing_child(Pid, {Name, MFA, RestartType, Shutdown, worker, Mods}, Tracker);
-
-handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{} = Tracker) ->
-  do_add_existing_child(Pid, {Name, undefined, temporary, 200, worker, Mods}, Tracker);
-
+      Parent = self(),
+      proc_lib:spawn_link(fun() ->
+        put(name, {gen_tracker,Zone,proxy,Name}),
+        process_flag(trap_exit,true),
+        ets:update_element(Zone, Name, {#entry.sub_pid, self()}),
+        erlang:monitor(process,Pid),
+        proc_lib:hibernate(?MODULE, child_monitoring, [Zone, Name, Pid, Parent])
+      end),
+      {reply, {ok, Pid}, Tracker}
+  end;
 
 handle_call(stop, _From, #tracker{} = Tracker) ->
   {stop, normal, ok, Tracker};
@@ -476,29 +483,6 @@ which_children(Zone) ->
   ets:select(Zone, ets:fun2ms(fun(#entry{name = Name, pid = Pid, child_type = CT, mods = Mods}) ->
     {Name, Pid, CT, Mods}
   end)).
-
-
-
-do_add_existing_child(Pid, {Name, MFA, _RestartType, _Shutdown, worker, Mods}, #tracker{zone = Zone} = Tracker) ->
-  case ets:lookup(Zone, Name) of
-    [#entry{pid = Pid2}] ->
-      {reply, {error, {already_started, Pid2}}, Tracker};
-    [] ->
-      Ref = erlang:monitor(process,Pid),
-      ets:insert(Zone, #entry{name = Name, mfa = MFA, sub_pid = Pid, pid = Pid, restart_type = temporary,
-        shutdown = 200, child_type = worker, mods = Mods, ref = Ref}),
-
-      Parent = self(),
-      proc_lib:spawn_link(fun() ->
-        put(name, {gen_tracker,Zone,proxy,Name}),
-        process_flag(trap_exit,true),
-        ets:update_element(Zone, Name, {#entry.sub_pid, self()}),
-        erlang:monitor(process,Pid),
-        proc_lib:hibernate(?MODULE, child_monitoring, [Zone, Name, Pid, Parent])
-      end),
-      {reply, {ok, Pid}, Tracker}
-  end.
-
 
 % restart_later(Zone, #entry{name = Name, restart_timer = OldTimer, restart_delay = OldDelay} = Entry) ->
 %   case OldTimer of
