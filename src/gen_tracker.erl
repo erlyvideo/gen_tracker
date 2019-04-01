@@ -245,9 +245,9 @@ launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
         Parent ! {launch_ready, self(), Name, Error}
     catch
-      _Class:Error ->
+      _Class:Error:Stack ->
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
-          [Zone, Name,Error, erlang:get_stacktrace()]),
+          [Zone, Name,Error, Stack]),
         Parent ! {launch_ready, self(), Name, {error, Error}}
     end 
   end).
@@ -354,10 +354,10 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
   end;
 
 
-handle_call({add_existing_child, {Pid, {Name, MFA, RestartType, Shutdown, worker, Mods}}}, _From, #tracker{zone = Zone} = Tracker) ->
+handle_call({add_existing_child, {Pid, {Name, MFA, RestartType, Shutdown, worker, Mods}}}, _From, #tracker{} = Tracker) ->
   do_add_existing_child(Pid, {Name, MFA, RestartType, Shutdown, worker, Mods}, Tracker);
 
-handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
+handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{} = Tracker) ->
   do_add_existing_child(Pid, {Name, undefined, temporary, 200, worker, Mods}, Tracker);
 
 
@@ -536,8 +536,8 @@ delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}) ->
       put(name, {gen_tracker_after_terminate,Zone,Name}),
       try M:after_terminate(Name, Attrs)
       catch
-        Class:Error ->
-          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n", [M, Name, Class, Error, erlang:get_stacktrace()])
+        Class:Error:Stack ->
+          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n", [M, Name, Class, Error, Stack])
       end;
     false -> ok
   end,
