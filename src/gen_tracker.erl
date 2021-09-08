@@ -12,6 +12,7 @@
 -export([start_link/1, find/2, find_or_open/2, info/2, list/1, setattr/3, setattr/4, getattr/3, getattr/4, increment/4,delattr/3]).
 -export([wait/1]).
 -export([list/2, info/3]).
+-export([init_ack/1]).
 
 -export([which_children/1]).
 -export([add_existing_child/2]).
@@ -28,7 +29,7 @@
 
 -record(launch, {
   name,
-  mfa,
+  spec,
   pid,
   ref,
   waiters = []
@@ -87,11 +88,13 @@ build_key_condition([Key|Keys]) -> {'orelse', {'==', '$2', Key}, build_key_condi
 
 setattr(Zone, Name, Attributes) ->
   % ets:insert(attr_table(Zone), [{{Name, K}, V} || {K,V} <- Attributes]).
-  gen_server:call(attr_process(Zone), {set, Name, Attributes}).
+  ok == gen_server:call(attr_process(Zone), {set, Name, Attributes}) orelse error({void_setting,Zone,Name,[K || {K,_} <- Attributes]}),
+  ok.
 
 setattr(Zone, Name, Key, Value) ->
   % ets:insert(attr_table(Zone), {{Name, Key}, Value}).
-  gen_server:call(attr_process(Zone), {set, Name, Key, Value}).
+  ok == gen_server:call(attr_process(Zone), {set, Name, Key, Value}) orelse error({void_setting,Zone,Name,Key}),
+  ok.
 
 delattr(Zone,Name,Key) ->
   % ets:delete(attr_table(Zone),{Name,Key}).
@@ -120,15 +123,15 @@ increment(Zone, Name, Key, Incr) ->
   ets:update_counter(attr_table(Zone), {Name, Key}, Incr).
 
 list(Zone) ->
-  [{Name,[{pid,Pid}|info(Zone, Name)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+  [{Name,[{pid,Pid}|info(Zone, Name)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone), is_pid(Pid)].
 
 
 list(Zone, []) ->
-  [{Name,[{pid,Pid}]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)];
+  [{Name,[{pid,Pid}]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone), is_pid(Pid)];
 
 list(Zone, Keys) ->
   KeysMS = {ms, build_key_condition(Keys)},
-  [{Name,[{pid,Pid}|info(Zone, Name, KeysMS)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone)].
+  [{Name,[{pid,Pid}|info(Zone, Name, KeysMS)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone), is_pid(Pid)].
 
 
 
@@ -136,7 +139,9 @@ list(Zone, Keys) ->
 find(Zone, Name) ->
   case ets:lookup(Zone, Name) of
     [] -> undefined;
-    [#entry{pid = Pid}] -> {ok, Pid}
+    [#entry{pid = launching}] -> undefined;
+    [#entry{pid = terminating}] -> undefined;
+    [#entry{pid = Pid}] when is_pid(Pid) -> {ok, Pid}
   end.
 
 find_or_open(Zone, {Name, MFA, RestartType}) ->
@@ -144,12 +149,13 @@ find_or_open(Zone, {Name, MFA, RestartType}) ->
 
 find_or_open(Zone, {Name, _MFA, _RestartType, _Shutdown, _ChildType, _Mods} = ChildSpec) ->
   try ets:lookup(Zone, Name) of
-    [] ->
+    [#entry{pid = Pid}] when is_pid(Pid) ->
+      {ok, Pid};
+    _ ->
       case supervisor:check_childspecs([ChildSpec]) of
         ok -> gen_server:call(Zone, {find_or_open, ChildSpec}, 60000);
         Error -> Error
-      end;
-    [#entry{pid = Pid}] -> {ok, Pid}
+      end
   catch
     error:badarg -> {error, gen_tracker_not_started}
   end.
@@ -157,6 +163,13 @@ find_or_open(Zone, {Name, _MFA, _RestartType, _Shutdown, _ChildType, _Mods} = Ch
 % Sync call to ensure that all messages has been processed
 wait(Zone) ->
   gen_server:call(Zone, wait).
+
+
+init_ack(Ret) ->
+  [Launcher|_] = get('$ancestors'),
+  proc_lib:init_ack(Ret),
+  gen_server:call(Launcher, wait).
+
 
 
 add_existing_child(Tracker, {_Name, Pid, worker, _} = ChildSpec) when is_pid(Pid) ->
@@ -197,27 +210,42 @@ init_setter(Zone) ->
   erlang:register(attr_process(Zone), self()),
   proc_lib:init_ack({ok, self()}),
   put(name, {setter, Zone}),
-  loop_setter(attr_table(Zone)).
+  loop_setter(Zone, attr_table(Zone)).
 
-loop_setter(Table) ->
+loop_setter(Zone, Table) ->
   Msg = receive M -> M end,
   case Msg of
-    {'$gen_call', From, {set, Name, Key, Value}} ->
-      gen:reply(From, ok),
-      ets:insert(Table, {{Name, Key}, Value}),
-      loop_setter(Table);
-    {'$gen_call', From, {set, Name, Attributes}} ->
-      gen:reply(From, ok),
-      ets:insert(Table, [{{Name, K}, V} || {K,V} <- Attributes]),
-      loop_setter(Table);
-    {'$gen_call', From, {delete, Name, Key}} ->
-      gen:reply(From, ok),
-      ets:delete(Table, {Name, Key}),
-      loop_setter(Table);
+    {'$gen_call', From, Call} ->
+      {ok, Reply} = handle_setter_call(Call, Zone, Table),
+      gen:reply(From, Reply),
+      loop_setter(Zone, Table);
     Else ->
       error_logger:info_msg("Unknown msg to ~p: ~p", [Table, Else]),
-      loop_setter(Table)
+      loop_setter(Zone, Table)
   end.
+
+
+handle_setter_call({set, Name, Key, Value}, Zone, Table) ->
+  case ets:lookup(Zone, Name) of
+    [#entry{pid = Pid}] when is_pid(Pid); Pid == launching ->
+      ets:insert(Table, {{Name, Key}, Value}),
+      {ok, ok};
+    _ ->
+      {ok, {error, enoent}}
+  end;
+
+handle_setter_call({set, Name, Attributes}, Zone, Table) ->
+  case ets:lookup(Zone, Name) of
+    [#entry{pid = Pid}] when is_pid(Pid); Pid == launching ->
+      ets:insert(Table, [{{Name, K}, V} || {K,V} <- Attributes]),
+      {ok, ok};
+    _ ->
+      {ok, {error, enoent}}
+  end;
+
+handle_setter_call({delete, Name, Key}, _Zone, Table) ->
+  ets:delete(Table, {Name, Key}),
+  {ok, ok}.
 
 
 
@@ -227,20 +255,26 @@ launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
   proc_lib:spawn_link(fun() ->
     put(name, {gen_tracker,Zone,proxy,Name}),
     process_flag(trap_exit,true),
+    ets:insert(Zone, #entry{
+        name = Name, mfa = {M,F,A}, restart_type = RestartType, shutdown = Shutdown, child_type = ChildType, mods = Mods,
+        pid = launching, sub_pid = self()
+    }),
     try erlang:apply(M,F,A) of
       {ok, Pid} ->
-        ets:insert(Zone, #entry{name = Name, mfa = {M,F,A}, pid = Pid, restart_type = RestartType, 
-          shutdown = Shutdown, child_type = ChildType, sub_pid = self(), mods = Mods}),
-        Parent ! {launch_ready, self(), Name, {ok, Pid}},
+        ets:update_element(Zone, Name, {#entry.pid, Pid}),
+        gen_server:call(Parent, {launch_ready, self(), Name, {ok, Pid}}, 30000),
         erlang:monitor(process,Pid),
         proc_lib:hibernate(?MODULE, child_monitoring, [Zone, Name, Pid, Parent]);
       {error, Error} ->
+        ets:delete(Zone, Name),
         Parent ! {launch_ready, self(), Name, {error, Error}};
       Error ->
+        ets:delete(Zone, Name),
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
         Parent ! {launch_ready, self(), Name, Error}
     catch
       _Class:Error:Stack ->
+        ets:delete(Zone, Name),
         error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
           [Zone, Name,Error, Stack]),
         Parent ! {launch_ready, self(), Name, {error, Error}}
@@ -252,8 +286,10 @@ child_monitoring(Zone, Name, Pid, Parent) ->
   receive
     M ->
       case M of
+        {'$gen_call', From, wait} ->
+          gen:reply(From, ok);
         {'EXIT', Parent, Reason} ->
-          delete_entry(Zone, Name),
+          catch cleanup_from_parent_death(Zone, Name, Reason),
           exit(Pid, Reason),
           receive
             {'DOWN', _, _, Pid, _} -> ok
@@ -261,8 +297,8 @@ child_monitoring(Zone, Name, Pid, Parent) ->
             5000 -> ok
           end,
           exit(Reason);
-        {'DOWN', _, _, Pid, _} ->
-          delete_entry(Zone, Name),
+        {'DOWN', _, _, Pid, Reason} ->
+          catch cleanup_from_child_death(Zone, Name, Reason),
           exit(normal);
         _ -> ok
       end
@@ -272,39 +308,50 @@ child_monitoring(Zone, Name, Pid, Parent) ->
   proc_lib:hibernate(?MODULE, child_monitoring, [Zone, Name, Pid, Parent]).
 
 
-
-shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown, name = Name}, Zone) when is_number(Shutdown) ->
-  exit(SubPid, shutdown),
-  receive
-    {'EXIT', SubPid, _Reason} -> ok
-  after
-    Shutdown ->
-      erlang:exit(SubPid, kill),
-      erlang:exit(Pid, kill),
-      delete_entry(Zone, Name),
-      receive
-        {'EXIT', SubPid,_} -> ok
-      end
-  end,
-  ok;
-
-shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = brutal_kill, name = Name}, Zone) ->
-  delete_entry(Zone, Name),
-  erlang:exit(SubPid, kill),
-  erlang:exit(Pid, kill),
-  receive
-    {'EXIT', SubPid,_} -> ok
-  end,
-  ok;
-
-shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity, name = Name}, Zone) ->
-  erlang:exit(SubPid, shutdown),
-  erlang:exit(Pid, shutdown),
-  receive
-    {'EXIT', SubPid,_} -> ok
-  end,
-  delete_entry(Zone, Name),
+cleanup_from_parent_death(Zone, Name, Reason) ->
+  delete_entry(Zone, Name, Reason),
   ok.
+
+cleanup_from_child_death(Zone, Name, Reason) ->
+  delete_entry(Zone, Name, Reason),
+  ok.
+
+
+
+shutdown_children(Scope, Entries, Zone) ->
+  MonRefs = [async_shutdown_child(E, Zone) || E <- Entries],
+  [receive {'DOWN', R, _, _, _} -> ok end || R <- lists:flatten(MonRefs), is_reference(R)],
+  case Scope of
+    one ->
+      [ets:select_delete(attr_table(Zone), ets:fun2ms(fun({{N, _}, _}) when N == Name -> true end)) || #entry{name = Name} <- Entries],
+      [ets:delete(Zone, Name) || #entry{name = Name} <- Entries];
+    all ->
+      ets:delete_all_objects(attr_table(Zone)),
+      ets:delete_all_objects(Zone)
+  end,
+  ok.
+
+async_shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = Shutdown}, _Zone) when is_number(Shutdown) ->
+  is_pid(Pid) andalso erlang:exit(Pid, shutdown),
+  erlang:exit(SubPid, shutdown),
+  timer:exit_after(Shutdown, SubPid, kill),
+  SubRef = erlang:monitor(process, SubPid),
+  WRefs = [begin timer:exit_after(Shutdown, Pid, kill), erlang:monitor(process, Pid) end || is_pid(Pid)],
+  [SubRef|WRefs];
+
+
+async_shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = brutal_kill}, _Zone) ->
+  is_pid(Pid) andalso erlang:exit(Pid, kill),
+  timer:exit_after(100, SubPid, kill),          % give it 100 ms for cleanup
+  SubRef = erlang:monitor(process, SubPid),
+  [SubRef];
+
+async_shutdown_child(#entry{sub_pid = SubPid, pid = Pid, shutdown = infinity}, _Zone) ->
+  erlang:exit(SubPid, shutdown),
+  is_pid(Pid) andalso erlang:exit(Pid, shutdown),
+  SubRef = erlang:monitor(process, SubPid),
+  WRefs = [erlang:monitor(process, Pid) || is_pid(Pid)],
+  [SubRef|WRefs].
 
 
 
@@ -313,27 +360,30 @@ handle_call(wait, _From, Tracker) ->
   {reply, ok, Tracker};
 
 handle_call(shutdown, _From, #tracker{zone = Zone} = Tracker) ->
-  [shutdown_child(E,Zone) || E <- ets:tab2list(Zone)],
+  shutdown_children(all, ets:tab2list(Zone), Zone),
   {stop, shutdown, ok, Tracker};
 
 handle_call(which_children, _From, #tracker{zone = Zone} = Tracker) ->
   {reply, which_children(Zone), Tracker};
 
-handle_call({find_or_open, {Name, {M,F,A}, _RT, _S, _CT, _M} = Spec}, From, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
+handle_call({find_or_open, {Name, {_,_,_}, _RT, _S, _CT, _M} = Spec}, From, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
   case ets:lookup(Zone, Name) of
-    [] ->
+    [#entry{pid = Pid}] when is_pid(Pid) ->
+      {reply, {ok, Pid}, Tracker};
+    Other ->
       case lists:keytake(Name, #launch.name, Launchers) of
         {value, #launch{waiters = Waiters} = L, Launchers1} ->
           L1 = L#launch{waiters = [From|Waiters]},
           {noreply, Tracker#tracker{launchers = [L1|Launchers1]}};
         false ->
-          Pid = launch_child(Zone, Spec),
-          Ref = erlang:monitor(process, Pid),
-          L = #launch{name = Name, pid = Pid, ref = Ref, mfa = {M,F,A}, waiters = [From]},
+          {Pid, Action} = case Other of
+            [] -> {launch_child(Zone, Spec), error};
+            [#entry{sub_pid = LauncherPid}] -> {LauncherPid, restart}
+          end,
+          Ref = erlang:monitor(process, Pid, [{tag, {launcher_down, Name, Action}}]),
+          L = #launch{name = Name, pid = Pid, ref = Ref, spec = Spec, waiters = [From]},
           {noreply, Tracker#tracker{launchers = [L|Launchers]}}
-      end;  
-    [#entry{pid = Pid}] ->
-      {reply, {ok, Pid}, Tracker}
+      end
   end;
 
 handle_call({terminate_child, Name}, From, #tracker{} = Tracker) ->
@@ -342,7 +392,7 @@ handle_call({terminate_child, Name}, From, #tracker{} = Tracker) ->
 handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
     [Entry] ->
-      shutdown_child(Entry, Zone),
+      shutdown_children(one, [Entry], Zone),
       {reply, ok, Tracker};
     [] ->
       {reply, {error, no_child}, Tracker}
@@ -350,7 +400,7 @@ handle_call({delete_child, Name}, _From, #tracker{zone = Zone} = Tracker) ->
 
 handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zone = Zone} = Tracker) ->
   case ets:lookup(Zone, Name) of
-    [#entry{pid = Pid2}] ->
+    [#entry{pid = Pid2}] when is_pid(Pid2) ->
       {reply, {error, {already_started, Pid2}}, Tracker};
     [] ->
       Ref = erlang:monitor(process,Pid),
@@ -370,6 +420,10 @@ handle_call({add_existing_child, {Name, Pid, worker, Mods}}, _From, #tracker{zon
 
 handle_call(stop, _From, #tracker{} = Tracker) ->
   {stop, normal, ok, Tracker};
+
+handle_call({launch_ready, _, _, _} = Msg, From, #tracker{} = Tracker) ->
+  gen:reply(From, ok),
+  handle_info(Msg, Tracker);
 
 handle_call(Call, _From, State) ->
   {stop, {unknown_call, Call}, State}.
@@ -392,6 +446,26 @@ handle_info({launch_ready, Launcher, Name, Reply}, #tracker{launchers = Launcher
   %     ok
   % end,
   {noreply, Tracker#tracker{launchers = Launchers1}};
+
+
+%% If launcher itself crashes, return an error to all clients
+handle_info({{launcher_down, Name, error}, _, process, _, Reason}, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
+  {value, #launch{name = Name, waiters = Waiters}, Launchers1} =
+    lists:keytake(Name, #launch.name, Launchers),
+  ets:select_delete(attr_table(Zone), ets:fun2ms(fun({{N, _}, _}) when N == Name -> true end)),
+  ets:delete(Zone, Name),
+  Reply = {error, Reason},
+  [gen_server:reply(From, Reply) || From <- Waiters],
+  {noreply, Tracker#tracker{launchers = Launchers1}};
+
+%% old launcher has finished its work (after_terminate), now it's time to start a new child as clients requested
+handle_info({{launcher_down, Name, restart}, _, process, _, _}, #tracker{zone = Zone, launchers = Launchers} = Tracker) ->
+  {value, L0, Launchers1} = lists:keytake(Name, #launch.name, Launchers),
+  #launch{name = Name, spec = Spec} = L0,
+  Pid = launch_child(Zone, Spec),
+  Ref = erlang:monitor(process, Pid, [{tag, {launcher_down, Name, error}}]),
+  L = L0#launch{pid = Pid, ref = Ref},
+  {noreply, Tracker#tracker{launchers = [L|Launchers1]}};
 
 
 % handle_info({'DOWN', _, process, Pid, Reason}, #tracker{zone = Zone} = Tracker) ->
@@ -463,7 +537,8 @@ terminate(_,#tracker{zone = Zone}) ->
         {'DOWN', _, _, SubPid, _} -> ok
       after
         Delay -> 
-          erlang:exit(SubPid,kill), erlang:exit(Pid,kill),
+          is_pid(SubPid) andalso erlang:exit(SubPid,kill),
+          is_pid(Pid) andalso erlang:exit(Pid,kill),
           receive
             {'DOWN', _, _, Pid, _} -> ok
           end,
@@ -508,34 +583,46 @@ which_children(Zone) ->
 
 
 
-delete_entry(Zone, #entry{name = Name, mfa = undefined}) ->
-  ets:delete(Zone, Name),
+delete_entry(Zone, #entry{name = Name, mfa = undefined}, _) ->
+  ets:update_element(Zone, Name, {#entry.pid, terminating}),
   ets:select_delete(attr_table(Zone), ets:fun2ms(fun({{N, _}, _}) when N == Name -> true end)),
+  ets:delete(Zone, Name),
   ok;
 
-delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}) ->
-  case erlang:function_exported(M, after_terminate, 2) of
-    true ->
+delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}, Reason) ->
+  ets:update_element(Zone, Name, {#entry.pid, terminating}),
+  UseAT3 = erlang:function_exported(M, after_terminate, 3),
+  UseAT2 = (not UseAT3) andalso erlang:function_exported(M, after_terminate, 2),
+  if
+    UseAT3 ->
+      Attrs = ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)),
+      put(name, {gen_tracker_after_terminate,Zone,Name}),
+      try M:after_terminate(Name, Attrs, Reason)
+      catch
+        Class:Error:Stack ->
+          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs,~p): ~p:~p\n~p\n",
+                                [M, Name, Reason, Class, Error, Stack])
+      end;
+    UseAT2 ->
       Attrs = ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)),
       put(name, {gen_tracker_after_terminate,Zone,Name}),
       try M:after_terminate(Name, Attrs)
       catch
         Class:Error:Stack ->
-          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n", [M, Name, Class, Error, Stack])
+          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n",
+                                [M, Name, Class, Error, Stack])
       end;
-    false -> ok
+    true ->
+      ok
   end,
-  ets:delete(Zone, Name),
   ets:select_delete(attr_table(Zone), ets:fun2ms(fun({{N, _}, _}) when N == Name -> true end)),
+  ets:delete(Zone, Name),
   ok;
 
-delete_entry(Zone, Name) ->
+delete_entry(Zone, Name, Reason) ->
   case ets:lookup(Zone, Name) of
-    [#entry{} = E] -> delete_entry(Zone, E);
+    [#entry{} = E] -> delete_entry(Zone, E, Reason);
     [] -> ok
   end.
 
 
-
-  
-  
