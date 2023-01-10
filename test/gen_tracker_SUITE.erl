@@ -242,8 +242,15 @@ async_exit_child(_) ->
     {dying, Name, P_} -> P_
   after 2000 -> error(no_after_terminate_report)
   end,
-  try gen_tracker:setattr(test_tracker, Name, [{should_fail, 123}]) of _ -> error(setattr_should_fail) catch _:_ -> ok end,
   erlang:monitor(process, P),
+  spawn_link(fun Setter() ->
+      undefined = gen_tracker:getattr(test_tracker, Name, testattr),
+      try gen_tracker:setattr(test_tracker, Name, [{testattr, 123}]) of
+        _ -> T ! setattr_succeeded
+      catch
+        _:_ -> timer:sleep(1), Setter()
+      end
+    end),
 
   ok = gen_server:call(G, wait, 50),
 
@@ -259,10 +266,11 @@ async_exit_child(_) ->
   % Wait until child is actually restarted
   {ok, Pid2} = restart_child_after_termination(Name, MFA, Pid, P, 1, 1000),
   % Collect client find_or_open results
-  [receive {found_pid, _} -> ok after 100 -> error(secondary_find_or_open_timeout) end || _ <- [1,2,3] ],
+  [receive {found_pid, NewPid} -> Pid2 = NewPid, ok after 100 -> error(secondary_find_or_open_timeout) end || _ <- [1,2,3] ],
+  receive setattr_succeeded -> ok after 100 -> error(no_setattr_after_restart) end,
   % No additional attributes should survive child restart
-  undefined = gen_tracker:getattr(test_tracker, Name, should_fail),
   undefined = gen_tracker:getattr(test_tracker, Name, tracker),
+  {ok, 123} = gen_tracker:getattr(test_tracker, Name, testattr),
   % Set tracker attr again
   gen_tracker:setattr(test_tracker, Name, [{tracker, G}]),
 
@@ -287,6 +295,8 @@ restart_child_after_termination(Name, MFA, Pid, ATPid, Tmo, Iters) ->
   receive
     {found_pid, Pid2} ->
       error({new_child_while_after_terminate_is_working, Pid2});
+    setattr_succeeded ->
+      error(setattr_succeeded_while_after_terminate_is_working);
     {'DOWN', _, _, ATPid, _} ->
       % after_terminate has exited, and gen_tracker must start a NEW child on immediate request
       {ok, Pid2} = gen_tracker:find_or_open(test_tracker, {Name, MFA, temporary, 200, worker, []}),
@@ -294,18 +304,8 @@ restart_child_after_termination(Name, MFA, Pid, ATPid, Tmo, Iters) ->
       {ok, Pid2}
   after
     Tmo ->
-      (Tmo > 0) orelse error(new_child_while_after_terminate_is_working),
-      % after_terminate seems to be still working, and the old pid should be returned
-      try gen_tracker:setattr(test_tracker, Name, [{should_fail, 328}]) of
-        ok -> 
-          % Just recurse with zero timeout to avoid copy-pasting   receive {'DOWN'...
-          % This should return {ok, Pid2} via first clause (or cause an error on zero timeout)
-          restart_child_after_termination(Name, MFA, Pid, ATPid, 0, 1)
-      catch
-        _:_ ->
-          % yep, continue checks
-          restart_child_after_termination(Name, MFA, Pid, ATPid, Tmo, Iters - 1)
-      end
+      % continue checks
+      restart_child_after_termination(Name, MFA, Pid, ATPid, Tmo, Iters - 1)
   end.
 
 

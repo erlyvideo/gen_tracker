@@ -1,12 +1,9 @@
 all:
-	./rebar compile
+	./rebar3 compile
 
 
-logs:
-	mkdir -p logs
-
-test: logs all
-	ct_run -pa ebin -dir test -logdir logs
+test: 
+	./rebar3 ct
 
 clean:
 	./rebar clean

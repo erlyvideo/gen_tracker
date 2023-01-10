@@ -6,10 +6,11 @@
 
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 
--export([start_link/1, find/2, find_or_open/2, info/2, list/1, setattr/3, setattr/4, getattr/3, getattr/4, increment/4,delattr/3]).
+-export([start_link/1, find/2, find_or_open/2, info/2, list/1, setattr/3, setattr/4, getattr/3, getattr/4, increment/4,increment/5,delattr/3]).
+-export([attrs/2]).
 -export([wait/1]).
 -export([list/2, info/3]).
 -export([init_ack/1]).
@@ -119,8 +120,16 @@ getattr(Zone, Name, Key, Timeout) ->
       Else
   end.  
 
+attrs(Zone, Name) ->
+  Attrs = ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)),
+  Attrs.
+
+
 increment(Zone, Name, Key, Incr) ->
   ets:update_counter(attr_table(Zone), {Name, Key}, Incr).
+
+increment(Zone, Name, Key, Incr, Default) ->
+  ets:update_counter(attr_table(Zone), {Name, Key}, Incr, {{Name, Key}, Default}).
 
 list(Zone) ->
   [{Name,[{pid,Pid}|info(Zone, Name)]} || #entry{name = Name, pid = Pid} <- ets:tab2list(Zone), is_pid(Pid)].
@@ -220,7 +229,7 @@ loop_setter(Zone, Table) ->
       gen:reply(From, Reply),
       loop_setter(Zone, Table);
     Else ->
-      error_logger:info_msg("Unknown msg to ~p: ~p", [Table, Else]),
+      ?LOG_INFO(#{unknown_msg => Else, table => Table, zone => Zone}),
       loop_setter(Zone, Table)
   end.
 
@@ -270,13 +279,12 @@ launch_child(Zone, {Name, {M,F,A}, RestartType, Shutdown, ChildType, Mods}) ->
         Parent ! {launch_ready, self(), Name, {error, Error}};
       Error ->
         ets:delete(Zone, Name),
-        error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n returned error: ~p~n", [Zone, Name, Error]),
+        ?LOG_ERROR(#{zone => Zone, name => Name, spawn_error => Error}),
         Parent ! {launch_ready, self(), Name, Error}
     catch
       _Class:Error:Stack ->
         ets:delete(Zone, Name),
-        error_logger:error_msg("Spawn function in gen_tracker ~p~n for name ~240p~n failed with error: ~p~nStacktrace: ~n~p~n", 
-          [Zone, Name,Error, Stack]),
+        ?LOG_ERROR(#{zone => Zone, name => Name, spawn_error => Error, stacktrace => Stack}),
         Parent ! {launch_ready, self(), Name, {error, Error}}
     end 
   end).
@@ -480,14 +488,14 @@ handle_info({{launcher_down, Name, restart}, _, process, _, _}, #tracker{zone = 
 %           NewRef = erlang:monitor(process,NewPid),
 %           ets:insert(Zone, Entry#entry{pid = NewPid, sub_pid = NewPid, ref = NewRef});
 %         {error, Error} ->
-%           error_logger:error_msg("Failed to restart transient ~s: ~p", [Name, Error]),
+%           ?LOG_ERROR("Failed to restart transient ~s: ~p", [Name, Error]),
 %           delete_entry(Zone, Entry);
 %         Error ->
-%           error_logger:error_msg("Failed to restart transient ~s: ~p", [Name, Error]),
+%           ?LOG_ERROR("Failed to restart transient ~s: ~p", [Name, Error]),
 %           delete_entry(Zone, Entry)
 %       catch
 %         _Class:Error ->
-%           error_logger:error_msg("Failed to restart transient ~s: ~p", [Name, Error]),
+%           ?LOG_ERROR("Failed to restart transient ~s: ~p", [Name, Error]),
 %           delete_entry(Zone, Entry)
 %       end;
 %     [#entry{name = Name, restart_type = permanent, mfa = {M,F,A}} = Entry] ->
@@ -496,11 +504,11 @@ handle_info({{launcher_down, Name, restart}, _, process, _, _}, #tracker{zone = 
 %           NewRef = erlang:monitor(process,NewPid),
 %           ets:insert(Zone, Entry#entry{pid = NewPid, sub_pid = NewPid, ref = NewRef});
 %         Error ->
-%           error_logger:error_msg("Error restarting permanent ~s: ~p", [Name, Error]),          
+%           ?LOG_ERROR("Error restarting permanent ~s: ~p", [Name, Error]),          
 %           restart_later(Zone, Entry)
 %       catch
 %         _Class:Error ->
-%           error_logger:error_msg("Error restarting permanent ~s: ~p", [Name, Error]),          
+%           ?LOG_ERROR("Error restarting permanent ~s: ~p", [Name, Error]),          
 %           restart_later(Zone, Entry)
 %       end;
 %     [] ->
@@ -599,18 +607,16 @@ delete_entry(Zone, #entry{name = Name, mfa = {M,_,_}}, Reason) ->
       put(name, {gen_tracker_after_terminate,Zone,Name}),
       try M:after_terminate(Name, Attrs, Reason)
       catch
-        Class:Error:Stack ->
-          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs,~p): ~p:~p\n~p\n",
-                                [M, Name, Reason, Class, Error, Stack])
+        _Class:Error:Stack ->
+          ?LOG_INFO(#{zone => Zone, name => Name, after_terminate_error => Error, stacktrace => Stack})
       end;
     UseAT2 ->
       Attrs = ets:select(attr_table(Zone), ets:fun2ms(fun({{N, K}, V}) when N == Name -> {K,V} end)),
       put(name, {gen_tracker_after_terminate,Zone,Name}),
       try M:after_terminate(Name, Attrs)
       catch
-        Class:Error:Stack ->
-          error_logger:info_msg("Error calling ~p:after_terminate(~p,attrs): ~p:~p\n~p\n",
-                                [M, Name, Class, Error, Stack])
+        _Class:Error:Stack ->
+          ?LOG_INFO(#{zone => Zone, name => Name, after_terminate_error => Error, stacktrace => Stack})
       end;
     true ->
       ok

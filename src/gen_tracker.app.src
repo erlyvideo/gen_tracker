@@ -1,6 +1,6 @@
 {application, gen_tracker,
  [
-  {description, ""},
+  {description, "gen_tracker"},
   {vsn, "1"},
   {registered, []},
   {applications, [
